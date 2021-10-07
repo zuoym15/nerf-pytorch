@@ -17,6 +17,10 @@ from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
+from load_dtu import DTU
+
+from skimage.metrics import structural_similarity
+import lpips
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,6 +150,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     rgbs = []
     disps = []
+    psnrs = []
+    ssims = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -169,10 +175,44 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             imageio.imwrite(filename, rgb8)
 
 
+        if gt_imgs is not None:
+            gt = gt_imgs[i] # H x W x 3
+            if not isinstance(gt, np.ndarray):
+                gt = gt.cpu().numpy()
+            pred = rgb.cpu().numpy()
+            if savedir is not None:
+                imageio.imwrite(os.path.join(savedir, '{:03d}_gt.png'.format(i)), to8b(gt))
+
+            # compute psnr
+            mse = np.mean((pred - gt)**2)
+            psnr = -10. * np.log(mse) / np.log(10.0)
+
+            # compute ssim
+            ssim = structural_similarity(gt, pred, data_range=1.0, multichannel=True)
+
+            psnrs.append(psnr)
+            ssims.append(ssim)
+
+
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
 
-    return rgbs, disps
+    if gt_imgs is not None:
+        lpips_vgg = lpips.LPIPS(net='vgg').cuda()
+        with torch.no_grad():
+            gt_imgs_torch = 2. * torch.tensor(gt_imgs).permute(0, 3, 1, 2).contiguous().cuda() - 1. # make range [-1,1]
+            pred_imgs_torch = 2. * torch.tensor(rgbs).permute(0, 3, 1, 2).contiguous().cuda() - 1. # make range [-1,1]
+
+            lpips_val = lpips_vgg(gt_imgs_torch, pred_imgs_torch)
+            lpips_val = lpips_val.mean().cpu().item()
+
+        metrics = {'ssim': np.mean(ssims), 'psnr': np.mean(psnr), 'lpips': lpips_val}
+
+    else:
+        metrics = {}
+
+
+    return rgbs, disps, metrics
 
 
 def create_nerf(args):
@@ -432,6 +472,8 @@ def config_parser():
                         help='input data directory')
 
     # training options
+    parser.add_argument("--N_iters", type=int, default=200000,
+                        help='number of training steps')
     parser.add_argument("--netdepth", type=int, default=8, 
                         help='layers in network')
     parser.add_argument("--netwidth", type=int, default=256, 
@@ -498,6 +540,11 @@ def config_parser():
     parser.add_argument("--shape", type=str, default='greek', 
                         help='options : armchair / cube / greek / vase')
 
+    ## dtu flags
+    parser.add_argument("--scan_name", type=str, default='')
+    parser.add_argument("--light_number", type=int, default=0)
+
+
     ## blender flags
     parser.add_argument("--white_bkgd", action='store_true', 
                         help='set to render synthetic data on a white bkgd (always use for dvoxels)')
@@ -538,7 +585,23 @@ def train():
 
     # Load data
     K = None
-    if args.dataset_type == 'llff':
+    if args.dataset_type == 'dtu':
+        dtu_loader = DTU(dataset_path=args.datadir, scene_name=args.scan_name, light_number=args.light_number)
+        images, poses, render_poses, K, i_split = dtu_loader.load_dtu_data()
+
+        H, W = images.shape[1], images.shape[2]
+
+        print('Loaded DTU', images.shape, render_poses.shape, K, args.datadir, args.scan_name, (H,W))
+        i_train, i_val, i_test = i_split
+
+        near = 425./400.
+        far = 935./400.
+
+        hwf = [H,W,(K[0,0]+K[1,1])/2.0]
+
+
+
+    elif args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
@@ -608,11 +671,12 @@ def train():
         return
 
     # Cast intrinsics to right types
-    H, W, focal = hwf
-    H, W = int(H), int(W)
-    hwf = [H, W, focal]
 
     if K is None:
+        H, W, focal = hwf
+        H, W = int(H), int(W)
+        hwf = [H, W, focal]
+
         K = np.array([
             [focal, 0, 0.5*W],
             [0, focal, 0.5*H],
@@ -665,9 +729,12 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor200)
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+
+            if len(metrics) > 0:
+                print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
 
             return
 
@@ -698,7 +765,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    N_iters = args.N_iters + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -767,6 +834,9 @@ def train():
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
+
+
+
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0
@@ -802,7 +872,7 @@ def train():
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
             with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs, disps, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
             moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
@@ -820,8 +890,11 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
+            print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
+
+            # compute psnr
 
 
     
