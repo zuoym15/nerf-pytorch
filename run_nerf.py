@@ -586,7 +586,8 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'dtu':
-        dtu_loader = DTU(dataset_path=args.datadir, scene_name=args.scan_name, light_number=args.light_number)
+        split = 'train' if 'train' in args.datadir else 'test'
+        dtu_loader = DTU(dataset_path=args.datadir, scene_name=args.scan_name, light_number=args.light_number, split=split)
         images, poses, render_poses, K, i_split = dtu_loader.load_dtu_data()
 
         H, W = images.shape[1], images.shape[2]

@@ -32,7 +32,7 @@ def scale_operation(images, intrinsics, s):
 
 
 class DTU(object):
-    def __init__(self, dataset_path, scene_name, light_number, world_scale=400.0, image_scale=0.25):
+    def __init__(self, dataset_path, scene_name, light_number, world_scale=400.0, image_scale=0.25, split='train'):
         self.dataset_path = dataset_path
         # self.num_frames = num_frames
         # self.min_angle = min_angle
@@ -44,9 +44,11 @@ class DTU(object):
         self.world_scale = world_scale
         self.image_scale = image_scale
         # self.precomputed_depth_path = precomputed_depth_path
+        self.split = split
 
         self._build_dataset_index()
         self._load_poses()
+
         # self.pairs_provided = pairs_provided
         # if pairs_provided:
         #     self.pair_list = load_pair(os.path.join(dataset_path, 'pair.txt'))
@@ -61,7 +63,11 @@ class DTU(object):
     #     return np.rad2deg(np.arccos(cos_theta))
 
     def _load_poses(self):
-        pose_glob = os.path.join(self.dataset_path, "Cameras", "train", "*.txt")
+        if self.split == 'train': # folder structure different for train and val/test set
+            pose_glob = os.path.join(self.dataset_path, "Cameras", "train", "*.txt")
+        else:
+            pose_glob = os.path.join(self.dataset_path, self.scene_name, "cams", "*.txt")
+
         extrinsics_list, intrinsics_list = [], []
         for cam_file in sorted(glob.glob(pose_glob)):
             extrinsics = np.loadtxt(cam_file, skiprows=1, max_rows=4, dtype=np.float)
@@ -96,7 +102,10 @@ class DTU(object):
 
     def _build_dataset_index(self):
         self.dataset_index = []
-        image_path = os.path.join(self.dataset_path, "Rectified")
+        if self.split == 'train':
+            image_path = os.path.join(self.dataset_path, "Rectified")
+        else:
+            image_path = self.dataset_path
         # depth_path = os.path.join(self.dataset_path, "Depths")
         # self.scale_between_image_depth = None
         self.scale_between_image_depth = 1.0
@@ -109,10 +118,14 @@ class DTU(object):
             # if scene[-6:] == "_train": id = int(scene[4:-6])
             # else: id = int(scene[4:])
             # if not id in training_set: continue
-            k = self.light_number
-            images = sorted(glob.glob(os.path.join(image_path, scene, "*_%d_*.png" % k)))
+            if self.split == 'train':
+                k = self.light_number
+                images = sorted(glob.glob(os.path.join(image_path, scene, "*_%d_*.png" % k)))
+                scene_id = "%s_%d" % (scene, k)
+            else:
+                images = sorted(glob.glob(os.path.join(image_path, scene, "images", "*.jpg")))
+                scene_id = scene
 
-            scene_id = "%s_%d" % (scene, k)
             self.scenes[scene_id] = images
             self.dataset_index += [(scene_id, i) for i in range(len(images))]
 
