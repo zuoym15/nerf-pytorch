@@ -19,7 +19,7 @@ from collections import OrderedDict
 #                     101, 102, 103, 104, 105, 107, 108, 109, 111, 112, 113, 115, 116, 119, 120,
 #                     121, 122, 123, 124, 125, 126, 127, 128]
 
-def scale_operation(images, intrinsics, s):
+def scale_operation(images, masks, intrinsics, s):
     ht1 = images.shape[0]
     wd1 = images.shape[1]
     ht2 = int(s * ht1)
@@ -27,17 +27,19 @@ def scale_operation(images, intrinsics, s):
     intrinsics[0, :] *= s
     intrinsics[1, :] *= s
     images = cv2.resize(images, (wd2, ht2))
+    masks = cv2.resize(masks, (wd2, ht2), interpolation=cv2.INTER_NEAREST)
     # images = F.interpolate(images, [ht2, wd2], mode='bilinear', align_corners=True)
-    return images, intrinsics
+    return images, masks, intrinsics
 
 
 class DTU(object):
-    def __init__(self, dataset_path, scene_name, light_number, world_scale=400.0, image_scale=0.25, split='train'):
+    def __init__(self, dataset_path, scene_name, light_number, foreground_mask_path=None, world_scale=400.0, image_scale=0.25, split='train'):
         self.dataset_path = dataset_path
         # self.num_frames = num_frames
         # self.min_angle = min_angle
         # self.max_angle = max_angle
         self.light_number = light_number
+        self.foreground_mask_path = foreground_mask_path
         # self.crop_size = crop_size
         # self.resize = resize
         self.scene_name = scene_name
@@ -141,24 +143,45 @@ class DTU(object):
 
         indicies = np.array(list(range(len(image_list))))
 
-        images, depths, poses, intrinsics = [], [], [], []
+        images, depths, poses, intrinsics, masks = [], [], [], [], []
         for i in indicies:
-            image = imageio.imread(image_list[i])
+            image = imageio.imread(image_list[i]) / 255.0
 
             pose = self.poses[i]
             calib = self.intrinsics[i]
 
-            image, calib = scale_operation(image, calib, self.image_scale)
+            if self.foreground_mask_path is not None:
+                img_name = os.path.basename(image_list[i]).split('_')[1]  # e.g. 002
+                img_name = str((int(img_name) - 1)).zfill(3)
+
+                scene_name = scene_id.split('_')[0]  # e.g. scan3
+                mask_fn = os.path.join(self.foreground_mask_path, scene_name, 'mask', img_name + '.png')
+
+                if not os.path.exists(mask_fn):
+                    print('warning: mask path %s does not exist!' % mask_fn )
+                    mask = np.ones_like(image[..., 0:1])  # all fg as default
+
+                else:
+                    mask = imageio.imread(mask_fn) / 255.0
+                    if mask.ndim == 3:
+                        mask = mask[..., 0:1]  # in case encoded as colorful image
+            else:
+                mask = np.ones_like(image[..., 0:1]) # all fg as default
+
+            image, mask, calib = scale_operation(image, mask, calib, self.image_scale)
 
             images.append(image)
             poses.append(pose)
             intrinsics.append(calib)
+            masks.append(mask)
 
+        masks = np.stack(masks, 0).astype(np.float32)
         images = np.stack(images, 0).astype(np.float32)
         poses = np.stack(poses, 0).astype(np.float32)
         intrinsics = np.stack(intrinsics, 0).astype(np.float32)
 
-        images /= 255.
+        if masks.ndim==3:
+            masks = masks[..., None]
 
         # focal = (intrinsics[0,0,0] + intrinsics[0,1,1]) / 2.
         # # print('focal_x', focal, 'focal_y', intrinsics[0,1,1])
@@ -173,7 +196,7 @@ class DTU(object):
 
         render_poses = poses[test_split]
 
-        return images, poses, render_poses, intrinsics[0], i_split
+        return images, masks, poses, render_poses, intrinsics[0], i_split
 
 if __name__ == '__main__':
     gpuargs = {'num_workers': 4, 'drop_last' : True, 'shuffle': True, 'pin_memory': True}

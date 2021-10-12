@@ -138,7 +138,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0, gt_masks=None):
 
     H, W, focal = hwf
 
@@ -152,6 +152,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     disps = []
     psnrs = []
     ssims = []
+
+    if gt_masks is None:
+        gt_masks = torch.ones_like(gt_imgs[..., 0:1]) # B x H x W x 1
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -168,27 +171,27 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             print(p)
         """
+        mask = gt_masks[i].cpu().numpy()  # H x W x 1
 
         if savedir is not None:
-            rgb8 = to8b(rgbs[-1])
-            filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
-
+            imageio.imwrite(os.path.join(savedir, '{:03d}.png'.format(i)), to8b(rgbs[-1]))
+            imageio.imwrite(os.path.join(savedir, '{:03d}_masked.png'.format(i)), to8b(rgbs[-1]*mask + 1.0 * (1.0 - mask)))
 
         if gt_imgs is not None:
-            gt = gt_imgs[i] # H x W x 3
-            if not isinstance(gt, np.ndarray):
-                gt = gt.cpu().numpy()
+            gt = gt_imgs[i].cpu().numpy() # H x W x 3
             pred = rgb.cpu().numpy()
             if savedir is not None:
                 imageio.imwrite(os.path.join(savedir, '{:03d}_gt.png'.format(i)), to8b(gt))
+                imageio.imwrite(os.path.join(savedir, '{:03d}_gt_masked.png'.format(i)), to8b(gt*mask + 1.0 * (1.0 - mask)))
 
             # compute psnr
-            mse = np.mean((pred - gt)**2)
+            mse = np.sum((pred * mask - gt * mask) ** 2) / np.sum(mask)
+            # mse = np.mean((pred - gt)**2)
             psnr = -10. * np.log(mse) / np.log(10.0)
 
             # compute ssim
-            ssim = structural_similarity(gt, pred, data_range=1.0, multichannel=True)
+            # ssim = structural_similarity(gt, pred, data_range=1.0, multichannel=True)
+            ssim = structural_similarity(gt * mask, pred * mask, data_range=1.0, multichannel=True)
 
             psnrs.append(psnr)
             ssims.append(ssim)
@@ -196,6 +199,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
+
+    # TODO: add mask to LPIPS
 
     if gt_imgs is not None:
         lpips_vgg = lpips.LPIPS(net='vgg').cuda()
@@ -543,6 +548,7 @@ def config_parser():
     ## dtu flags
     parser.add_argument("--scan_name", type=str, default='')
     parser.add_argument("--light_number", type=int, default=0)
+    parser.add_argument("--foreground_mask_path", type=str, default=None)
 
 
     ## blender flags
@@ -586,17 +592,19 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'dtu':
+        world_scale = 300.
         split = 'train' if 'train' in args.datadir else 'test'
-        dtu_loader = DTU(dataset_path=args.datadir, scene_name=args.scan_name, light_number=args.light_number, split=split)
-        images, poses, render_poses, K, i_split = dtu_loader.load_dtu_data()
+        dtu_loader = DTU(dataset_path=args.datadir, scene_name=args.scan_name, foreground_mask_path=args.foreground_mask_path, light_number=args.light_number, split=split, world_scale=world_scale)
+        images, masks, poses, render_poses, K, i_split = dtu_loader.load_dtu_data()
 
         H, W = images.shape[1], images.shape[2]
 
         print('Loaded DTU', images.shape, render_poses.shape, K, args.datadir, args.scan_name, (H,W))
         i_train, i_val, i_test = i_split
 
-        near = 425./400.
-        far = 935./400.
+        near = 425. / world_scale
+        far = 935./world_scale
+        # far = 1400. / world_scale
 
         hwf = [H,W,(K[0,0]+K[1,1])/2.0]
 
@@ -712,6 +720,7 @@ def train():
     render_kwargs_train.update(bds_dict)
     render_kwargs_test.update(bds_dict)
 
+
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
 
@@ -730,7 +739,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor200)
+            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=torch.Tensor(images).to(device), savedir=testsavedir, render_factor=args.render_factor, gt_masks=torch.Tensor(masks).to(device))
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
@@ -758,10 +767,13 @@ def train():
         print('done')
         i_batch = 0
 
-    # Move training data to GPU
-    if use_batching:
-        images = torch.Tensor(images).to(device)
     poses = torch.Tensor(poses).to(device)
+    images = torch.Tensor(images).to(device)
+    masks = torch.Tensor(masks).to(device)
+
+    # Move training data to GPU
+    # if use_batching:
+    #     images = torch.Tensor(images).to(device)
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
@@ -870,28 +882,28 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if i%args.i_video==0 and i > 0:
-            # Turn on testing mode
-            with torch.no_grad():
-                rgbs, disps, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
+        # if i%args.i_video==0 and i > 0:
+        #     # Turn on testing mode
+        #     with torch.no_grad():
+        #         rgbs, disps, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+        #     print('Done, saving', rgbs.shape, disps.shape)
+        #     moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+        #     imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+        #
+        #     # if args.use_viewdirs:
+        #     #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
+        #     #     with torch.no_grad():
+        #     #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+        #     #     render_kwargs_test['c2w_staticcam'] = None
+        #     #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
         if i%args.i_testset==0 and i > 0:
             testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, gt_masks=masks)
             print('Saved test set')
             print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
 
