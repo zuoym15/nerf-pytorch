@@ -188,9 +188,13 @@ class DTU(object):
         # H = images.shape[1]
         # W = images.shape[2]
 
-        train_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 8) != 0]
+        # train_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 8) != 0]
+        # val_split = []
+        # test_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 8) == 0]
+
+        train_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 7) != 2]
         val_split = []
-        test_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 8) == 0]
+        test_split = indicies[np.mod(np.arange(len(indicies), dtype=int), 7) == 2]
 
         i_split = [train_split, val_split, test_split]
 
