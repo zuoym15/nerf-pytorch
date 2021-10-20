@@ -185,7 +185,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
                 imageio.imwrite(os.path.join(savedir, '{:03d}_gt_masked.png'.format(i)), to8b(gt*mask + 1.0 * (1.0 - mask)))
 
             # compute psnr
-            mse = np.sum((pred * mask - gt * mask) ** 2) / np.sum(mask)
+            mse = np.sum((pred * mask - gt * mask) ** 2) / (3. * np.sum(mask)) # consider 3 channels
             # mse = np.mean((pred - gt)**2)
             psnr = -10. * np.log(mse) / np.log(10.0)
 
@@ -731,6 +731,7 @@ def train():
             if args.render_test:
                 # render_test switches to test poses
                 images = images[i_test]
+                masks = masks[i_test]
             else:
                 # Default is smoother render_poses path
                 images = None
@@ -903,7 +904,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, gt_masks=masks)
+                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, gt_masks=masks[i_test])
             print('Saved test set')
             print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
 
