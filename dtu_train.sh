@@ -10,7 +10,7 @@ datadir='/n/fs/pvl-mvs/DTU_HR/train'
 # datadir='/u/zeyum/x/DTU/mvs_testing'
 
 
-python run_nerf.py --expname "DTU_masked_${shape}_${light_number}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
+python run_nerf.py --expname "DTU_masked_split2_${shape}_${light_number}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
 --datadir ${datadir} --dataset_type dtu --foreground_mask_path /n/fs/pvl-viewsyn/dtu_mask \
 --use_viewdirs --lrate_decay 500 --N_samples 64 --N_importance 128 --N_rand 1024 \
 --precrop_iters 500 --precrop_frac 0.5 \

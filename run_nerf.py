@@ -1,6 +1,7 @@
 import os, sys
 import numpy as np
 import imageio
+import cv2
 import json
 import random
 import time
@@ -26,6 +27,31 @@ import lpips
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
+
+def compute_ssim(img1, img2):
+    # img1, img2: [0, 255]
+
+    C1 = (0.01 * 255)**2
+    C2 = (0.03 * 255)**2
+
+    img1 = img1.astype(np.float64)
+    img2 = img2.astype(np.float64)
+    kernel = cv2.getGaussianKernel(11, 1.5)
+    window = np.outer(kernel, kernel.transpose())
+
+    mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
+    mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
+    mu1_sq = mu1**2
+    mu2_sq = mu2**2
+    mu1_mu2 = mu1 * mu2
+    sigma1_sq = cv2.filter2D(img1**2, -1, window)[5:-5, 5:-5] - mu1_sq
+    sigma2_sq = cv2.filter2D(img2**2, -1, window)[5:-5, 5:-5] - mu2_sq
+    sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
+                                                            (sigma1_sq + sigma2_sq + C2))
+    return ssim_map
+
 
 
 def batchify(fn, chunk):
@@ -191,7 +217,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
             # compute ssim
             # ssim = structural_similarity(gt, pred, data_range=1.0, multichannel=True)
-            ssim = structural_similarity(gt * mask, pred * mask, data_range=1.0, multichannel=True)
+            # ssim = structural_similarity(gt * mask, pred * mask, data_range=1.0, multichannel=True)
+            ssim_custom = compute_ssim(gt * mask * 255.0, pred * mask * 255.0)
+            ssim_custom = np.mean(ssim_custom, axis=2)
+            ssim_custom = np.pad(ssim_custom, ((5, 5), (5, 5)), mode='mean')
+            ssim_custom = ssim_custom[..., None]
+            ssim = np.sum(ssim_custom * mask) / np.sum(mask)
 
             psnrs.append(psnr)
             ssims.append(ssim)
