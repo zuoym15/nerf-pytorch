@@ -183,10 +183,22 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         gt_masks = torch.ones_like(gt_imgs[..., 0:1]) # B x H x W x 1
 
     t = time.time()
+    net_time = 0.0
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+
+        start.record()
         rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        end.record()
+
+        torch.cuda.synchronize()
+
+        net_time += start.elapsed_time(end)
+        
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -226,6 +238,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
             psnrs.append(psnr)
             ssims.append(ssim)
+
+    net_time /= (float)(len(render_poses))
+
+    print('mean net time: %.2f' % net_time)
 
 
     rgbs = np.stack(rgbs, 0)
@@ -591,6 +607,8 @@ def config_parser():
     ## llff flags
     parser.add_argument("--factor", type=int, default=8, 
                         help='downsample factor for LLFF images')
+    parser.add_argument("--height", type=int, default=-1,
+                        help='downsample to this height for LLFF images. If specified, will override the factor args.')
     parser.add_argument("--no_ndc", action='store_true', 
                         help='do not use normalized device coordinates (set for non-forward facing scenes)')
     parser.add_argument("--lindisp", action='store_true', 
@@ -634,8 +652,8 @@ def train():
         i_train, i_val, i_test = i_split
 
         near = 425. / world_scale
-        far = 935./world_scale
-        # far = 1400. / world_scale
+        # far = 935./world_scale
+        far = 1400. / world_scale
 
         hwf = [H,W,(K[0,0]+K[1,1])/2.0]
 
@@ -644,7 +662,7 @@ def train():
     elif args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
+                                                                  spherify=args.spherify, height=args.height)
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
@@ -653,7 +671,11 @@ def train():
 
         if args.llffhold > 0:
             print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
+            # i_test = np.arange(images.shape[0])[::args.llffhold]
+
+            # change slightly the sample offset
+            i_test = np.arange(images.shape[0])
+            i_test = i_test[np.mod(i_test, args.llffhold) == 2]
 
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
@@ -668,6 +690,8 @@ def train():
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
+
+        masks = np.ones_like(images[..., 0:1])
 
     elif args.dataset_type == 'blender':
         images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
@@ -776,7 +800,7 @@ def train():
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             if len(metrics) > 0:
-                print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
+                print("PSNR: %.3f  SSIM: %.4f  LPIPS: %.4f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
 
             return
 
@@ -944,7 +968,7 @@ def train():
 
     
         if i%args.i_print==0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            tqdm.write(f"[TRAIN] {expname} Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
         """
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))

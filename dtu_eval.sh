@@ -9,10 +9,14 @@ shape='scan63' # fruits
 datadir='/n/fs/pvl-mvs/DTU_HR/train'
 # datadir='/u/zeyum/x/DTU/mvs_testing'
 
+mod='far1400'
 
-python run_nerf.py --expname "DTU_masked_${shape}_${light_number}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
---datadir ${datadir} --dataset_type dtu --foreground_mask_path /n/fs/pvl-viewsyn/dtu_mask \
+
+python run_nerf.py --expname "DTU_${mod}_${shape}_${light_number}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
+--datadir ${datadir} --dataset_type dtu \
 --use_viewdirs --lrate_decay 500 --N_samples 64 --N_importance 128 --N_rand 1024 \
 --precrop_iters 500 --precrop_frac 0.5 --i_testset 10000 \
 --scan_name ${shape} --light_number ${light_number} \
 --render_only --render_test
+
+# --foreground_mask_path /n/fs/pvl-viewsyn/dtu_mask
