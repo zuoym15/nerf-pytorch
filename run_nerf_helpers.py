@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import cv2
+from plyfile import PlyData, PlyElement
+import sys
 
 
 # Misc
@@ -237,3 +240,76 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
     samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
 
     return samples
+
+def visualize_depth(depth, mask=None, depth_min=None, depth_max=None, direct=False):
+    """Visualize the depth map with colormap.
+       Rescales the values so that depth_min and depth_max map to 0 and 1,
+       respectively.
+    """
+    if not direct:
+        depth = 1.0 / (depth + 1e-6)
+    invalid_mask = np.logical_or(np.isnan(depth), np.logical_not(np.isfinite(depth)))
+    if mask is not None:
+        invalid_mask += np.logical_not(mask)
+    if depth_min is None:
+        depth_min = np.percentile(depth[np.logical_not(invalid_mask)], 5)
+    if depth_max is None:
+        depth_max = np.percentile(depth[np.logical_not(invalid_mask)], 95)
+    depth[depth < depth_min] = depth_min
+    depth[depth > depth_max] = depth_max
+    depth[invalid_mask] = depth_max
+
+    depth_scaled = (depth - depth_min) / (depth_max - depth_min)
+    depth_scaled_uint8 = np.uint8(depth_scaled * 255)
+    depth_color = cv2.applyColorMap(depth_scaled_uint8, cv2.COLORMAP_MAGMA)
+    depth_color[invalid_mask, :] = 0
+
+    return depth_color
+
+def save_ply(plyfilename, vert_pos, vert_colors):
+    # vert pos has shape N x 3
+    # vert_colors has shape N x 3
+    # save
+    vertexs = vert_pos.cpu().numpy()
+    vertex_colors = ((vert_colors.cpu().numpy() + 1.0) / 2.0 * 255.0).astype(np.uint8)[...,[2,1,0]]
+    vertexs = np.array([tuple(v) for v in vertexs], dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
+    vertex_colors = np.array([tuple(v) for v in vertex_colors], dtype=[('red', 'u1'), ('green', 'u1'), ('blue', 'u1')])
+
+    vertex_all = np.empty(len(vertexs), vertexs.dtype.descr + vertex_colors.dtype.descr)
+    for prop in vertexs.dtype.names:
+        vertex_all[prop] = vertexs[prop]
+    for prop in vertex_colors.dtype.names:
+        vertex_all[prop] = vertex_colors[prop]
+
+    el = PlyElement.describe(vertex_all, 'vertex')
+    PlyData([el]).write(plyfilename)
+    print("saving the final model to", plyfilename)
+
+def write_pfm(file: str, image, scale=1):
+    with open(file, 'wb') as f:
+        color = None
+
+        if image.dtype.name != 'float32':
+            raise Exception('Image dtype must be float32.')
+
+        image = np.flipud(image)
+
+        if len(image.shape) == 3 and image.shape[2] == 3: # color image
+            color = True
+        elif len(image.shape) == 2 or len(image.shape) == 3 and image.shape[2] == 1: # greyscale
+            color = False
+        else:
+            raise Exception('Image must have H x W x 3, H x W x 1 or H x W dimensions.')
+
+        f.write(b'PF\n' if color else b'Pf\n')
+        f.write(b'%d %d\n' % (image.shape[1], image.shape[0]))
+
+        endian = image.dtype.byteorder
+
+        if endian == '<' or endian == '=' and sys.byteorder == 'little':
+            scale = -scale
+
+        f.write(b'%f\n' % scale)
+
+        image.tofile(f)
+

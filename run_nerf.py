@@ -19,6 +19,7 @@ from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 from load_dtu import DTU
+from pose_utils import gen_poses
 
 from skimage.metrics import structural_similarity
 import lpips
@@ -141,6 +142,9 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     sh = rays_d.shape # [..., 3]
     if ndc:
         # for forward facing scenes
+
+        rays_o_ori = rays_o.clone()
+        rays_d_ori = rays_d.clone()
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
@@ -158,13 +162,18 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
+    if ndc:
+        all_ret['depth_map'] = -1/rays_d_ori[..., 2]*(1 / (1 - all_ret['depth_map']) + rays_o_ori[..., 2])
+    # print(torch.min(all_ret['depth_map']).item(), torch.max(all_ret['depth_map']).item())
+
+
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
     ret_list = [all_ret[k] for k in k_extract]
     ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0, gt_masks=None):
+def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None, savedir=None, render_factor=0, gt_masks=None):
 
     H, W, focal = hwf
 
@@ -178,6 +187,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     disps = []
     psnrs = []
     ssims = []
+    depths = []
 
     if gt_masks is None:
         gt_masks = torch.ones_like(gt_imgs[..., 0:1]) # B x H x W x 1
@@ -192,8 +202,14 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         end = torch.cuda.Event(enable_timing=True)
 
         start.record()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         end.record()
+        depth = extras['depth_map'] / sc
+        print('depth min/max:', torch.min(depth).item(), torch.max(depth).item())
+        depth = depth.cpu().numpy()
+        depths.append(depth)
+
+        color_depth = visualize_depth(depth)[..., [2,1,0]]
 
         torch.cuda.synchronize()
 
@@ -211,9 +227,14 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         """
         mask = gt_masks[i].cpu().numpy()  # H x W x 1
 
+        if not os.path.exists(os.path.join(savedir, 'depths')):
+            os.mkdir(os.path.join(savedir, 'depths'))
+
         if savedir is not None:
             imageio.imwrite(os.path.join(savedir, '{:03d}.png'.format(i)), to8b(rgbs[-1]))
             imageio.imwrite(os.path.join(savedir, '{:03d}_masked.png'.format(i)), to8b(rgbs[-1]*mask + 1.0 * (1.0 - mask)))
+            imageio.imwrite(os.path.join(savedir, '{:03d}_depth.png'.format(i)), color_depth)
+            write_pfm(os.path.join(savedir, 'depths', '{:03d}.pfm'.format(i)), depth.astype(np.float32))
 
         if gt_imgs is not None:
             gt = gt_imgs[i].cpu().numpy() # H x W x 3
@@ -247,8 +268,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
 
-    # TODO: add mask to LPIPS
-
     if gt_imgs is not None:
         lpips_vgg = lpips.LPIPS(net='vgg').cuda()
         with torch.no_grad():
@@ -259,6 +278,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             lpips_val = lpips_val.mean().cpu().item()
 
         metrics = {'ssim': np.mean(ssims), 'psnr': np.mean(psnr), 'lpips': lpips_val}
+        if savedir is not None:
+            with open(os.path.join(savedir, "results.json")) as out_file:
+                json.dump(metrics, out_file)
 
     else:
         metrics = {}
@@ -494,7 +516,7 @@ def render_rays(ray_batch,
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map': depth_map}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
@@ -544,7 +566,9 @@ def config_parser():
                         help='number of rays processed in parallel, decrease if running out of memory')
     parser.add_argument("--netchunk", type=int, default=1024*64, 
                         help='number of pts sent through network in parallel, decrease if running out of memory')
-    parser.add_argument("--no_batching", action='store_true', 
+    parser.add_argument("--batching_end_iter", type=int, default=1000000,
+                        help='apply the no_batching after this iter num')
+    parser.add_argument("--no_batching", action='store_true',
                         help='only take random rays from 1 image at a time')
     parser.add_argument("--no_reload", action='store_true', 
                         help='do not reload weights from saved ckpt')
@@ -640,6 +664,8 @@ def train():
 
     # Load data
     K = None
+    sc = 1.0 # scale factor
+
     if args.dataset_type == 'dtu':
         world_scale = 300.
         split = 'train' if 'train' in args.datadir else 'test'
@@ -660,7 +686,8 @@ def train():
 
 
     elif args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        gen_poses(args.datadir)
+        images, poses, bds, render_poses, i_test, sc = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify, height=args.height)
         hwf = poses[0,:3,-1]
@@ -705,6 +732,8 @@ def train():
             images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
         else:
             images = images[...,:3]
+
+        masks = np.ones_like(images[..., 0:1])
 
     elif args.dataset_type == 'LINEMOD':
         images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
@@ -789,13 +818,15 @@ def train():
                 masks = masks[i_test]
             else:
                 # Default is smoother render_poses path
-                images = None
+                # images = None
+                # render all
+                render_poses = torch.Tensor(np.array(poses)).to(device)
 
             testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=torch.Tensor(images).to(device), savedir=testsavedir, render_factor=args.render_factor, gt_masks=torch.Tensor(masks).to(device))
+            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=torch.Tensor(images).to(device), savedir=testsavedir, render_factor=args.render_factor, gt_masks=torch.Tensor(masks).to(device))
             print('Done rendering', testsavedir)
             imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
@@ -847,8 +878,11 @@ def train():
     for i in trange(start, N_iters):
         time0 = time.time()
 
+        if i == args.batching_end_iter:
+            print('switching to no_batching mode after %d steps' % i)
+
         # Sample random ray batch
-        if use_batching:
+        if use_batching and i < args.batching_end_iter:
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
@@ -860,7 +894,6 @@ def train():
                 rand_idx = torch.randperm(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
-
         else:
             # Random from one image
             img_i = np.random.choice(i_train)
@@ -959,7 +992,7 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
-                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir, gt_masks=masks[i_test])
+                _, _, metrics = render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=images[i_test], savedir=testsavedir, gt_masks=masks[i_test])
             print('Saved test set')
             print("PSNR: %.3f  SSIM: %.3f  LPIPS: %.3f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
 
