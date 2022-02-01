@@ -279,7 +279,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None
 
         metrics = {'ssim': np.mean(ssims), 'psnr': np.mean(psnr), 'lpips': lpips_val}
         if savedir is not None:
-            with open(os.path.join(savedir, "results.json")) as out_file:
+            with open(os.path.join(savedir, "results.json"), 'w') as out_file:
                 json.dump(metrics, out_file)
 
     else:
@@ -880,6 +880,7 @@ def train():
 
         if i == args.batching_end_iter:
             print('switching to no_batching mode after %d steps' % i)
+            N_rand = args.N_rand // 2 # 1024
 
         # Sample random ray batch
         if use_batching and i < args.batching_end_iter:

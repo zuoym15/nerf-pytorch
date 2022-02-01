@@ -8,7 +8,7 @@ shape=$2 # command line input
 if [ "$dataset" == 'LLFF' ]
 then
     datadir='/n/fs/pvl-viewsyn/llff/colmap_dense'
-    mod='baseline_lowres_nobatch'
+    mod='baseline_lowres_batching'
 
     python run_nerf.py --expname "LLFF_${mod}_${shape}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
     --datadir "${datadir}/${shape}" --dataset_type llff \
@@ -16,7 +16,7 @@ then
     --llffhold 5 --height 300 --raw_noise_std 1e0 \
     --N_iters 200000 \
     --i_video 1000000 --i_weights 50000 --i_testset 50000 \
-    --no_batching
+    # --no_batching
 
 elif [ "$dataset" == 'DTUHR' ]
 then
@@ -25,7 +25,7 @@ then
 
     python run_nerf.py --expname "DTU_${mod}_${shape}_${light_number}" --basedir /n/fs/pvl-viewsyn/nerf/logs \
     --datadir ${datadir} --dataset_type dtu \
-    --use_viewdirs --lrate_decay 500 --N_samples 64 --N_importance 128 --N_rand 1024 \
+    --use_viewdirs --lrate_decay 500 --N_samples 64 --N_importance 128 --N_rand 2048 \
     --scan_name ${shape} --light_number ${light_number} \
     --N_iters 200000 \
     --i_video 1000000 --i_weights 50000 --i_testset 50000 \
