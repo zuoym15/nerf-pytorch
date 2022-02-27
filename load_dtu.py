@@ -5,11 +5,6 @@ import cv2
 import imageio
 
 # import matplotlib.pyplot as plt
-
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-
 from collections import OrderedDict
 
 
@@ -81,6 +76,8 @@ class DTU(object):
             intrinsics_list.append(intrinsics)
 
         poses = np.stack(extrinsics_list, 0)
+
+        self.raw_poses = poses
 
         # convert w2c to c2w
         poses = np.linalg.inv(poses)
@@ -198,7 +195,67 @@ class DTU(object):
 
         i_split = [train_split, val_split, test_split]
 
-        render_poses = poses[test_split]
+        # render_poses = poses[test_split]
+
+        # get render_poses
+
+        N_views = 60
+        N_rots = 1
+
+        pivot_dist = 800
+        max_angle = 10
+
+        trans_t = lambda t: np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, t],
+            [0, 0, 0, 1]])
+
+        rot_phi = lambda phi: np.array([
+            [1, 0, 0, 0],
+            [0, np.cos(phi), -np.sin(phi), 0],
+            [0, np.sin(phi), np.cos(phi), 0],
+            [0, 0, 0, 1]])
+
+        rot_theta = lambda th: np.array([
+            [np.cos(th), 0, -np.sin(th), 0],
+            [0, 1, 0, 0],
+            [np.sin(th), 0, np.cos(th), 0],
+            [0, 0, 0, 1]])
+
+
+        def pose_spherical(theta, phi, radius):
+            w2c = rot_phi(phi / 180. * np.pi)
+            w2c = rot_theta(theta / 180. * np.pi) @ w2c
+            w2c = trans_t(radius) @ w2c
+
+            return w2c
+
+        center_pose = self.raw_poses[23]
+        # center_pose = np.concatenate([center_pose, np.array([0,0,0,1.]).reshape(1, 4)], 0)
+
+        pivot_T_cam = trans_t(-pivot_dist)
+        # render_pose_T_pivot = pose_spherical(0, 0, pivot_dist)
+        render_poses_T_pivot = [pose_spherical(max_angle * np.sin(theta), max_angle * np.cos(theta), pivot_dist)
+                                for theta in np.linspace(0, 2 * np.pi * N_rots, N_views * N_rots + 1)[:-1]]
+
+        render_poses = [render_pose_T_pivot @ pivot_T_cam @ center_pose for render_pose_T_pivot in render_poses_T_pivot]  # render_pose_T_world
+        render_poses = np.stack(render_poses, 0)  # N_views x 4 x 4.
+
+        # this is w2c. need to convert to c2w
+        render_poses = np.linalg.inv(render_poses)
+
+        transf = np.array([
+            [1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1.],
+        ])
+
+        render_poses = render_poses @ transf  # to opengl pose
+        render_poses[:, :3, 3] /= self.world_scale  # make the xyz range near 1
+
+        render_poses = render_poses[:, :3, :4]  # N x 3 x 4
 
         return images, masks, poses, render_poses, intrinsics[0], i_split
 

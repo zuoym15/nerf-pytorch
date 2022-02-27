@@ -173,7 +173,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None, savedir=None, render_factor=0, gt_masks=None):
+def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None, savedir=None, render_factor=0, gt_masks=None, val_cam_noise=0.0):
 
     H, W, focal = hwf
 
@@ -189,8 +189,22 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None
     ssims = []
     depths = []
 
-    if gt_masks is None:
+    if gt_masks is None and gt_imgs is not None:
         gt_masks = torch.ones_like(gt_imgs[..., 0:1]) # B x H x W x 1
+
+    if val_cam_noise > 0.0:
+        # generate the noise with a fixed random seed, so that we can compare fairly with nerf
+        torch.manual_seed(0)
+        lie = Lie()
+        se3_noise = torch.randn(len(render_poses), 6, device=torch.device('cuda')) * val_cam_noise
+        SE3_noise = lie.se3_to_SE3(se3_noise)  # 1 x 3 x 4
+
+        # make these 4x4 for easy composition
+        SE3_noise = torch.cat([SE3_noise, torch.tensor([0.0, 0.0, 0.0, 1.0], device=torch.device('cuda')).reshape(1, 1, 4).repeat(len(render_poses), 1, 1)], dim=1)
+        render_poses = torch.cat([render_poses, torch.tensor([0.0, 0.0, 0.0, 1.0], device=torch.device('cuda')).reshape(1, 1, 4).repeat(len(render_poses), 1, 1)], dim=1)
+
+        # adjust world scale for dtu
+        SE3_noise[:, :3, 3] /= 400.0
 
     t = time.time()
     net_time = 0.0
@@ -200,6 +214,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
+
+        if val_cam_noise > 0.0:
+            c2w = torch.matmul(torch.inverse(SE3_noise[i]), c2w)
 
         start.record()
         rgb, disp, acc, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
@@ -225,7 +242,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, sc=1.0, gt_imgs=None
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             print(p)
         """
-        mask = gt_masks[i].cpu().numpy()  # H x W x 1
+        if gt_masks is not None:
+            mask = gt_masks[i].cpu().numpy()  # H x W x 1
+        else:
+            mask = np.ones([rgb.shape[0], rgb.shape[1], 1])
 
         if not os.path.exists(os.path.join(savedir, 'depths')):
             os.mkdir(os.path.join(savedir, 'depths'))
@@ -599,6 +619,8 @@ def config_parser():
                         help='render the test set instead of render_poses path')
     parser.add_argument("--render_factor", type=int, default=0, 
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+    parser.add_argument("--val_cam_noise", type=float, default=0.0,
+                        help='add noise to the cam pose during eval. for debug only')
 
     # training options
     parser.add_argument("--precrop_iters", type=int, default=0,
@@ -816,19 +838,25 @@ def train():
                 # render_test switches to test poses
                 images = images[i_test]
                 masks = masks[i_test]
+
+                images = torch.Tensor(images).to(device)
+                masks = torch.Tensor(masks).to(device)
             else:
                 # Default is smoother render_poses path
-                # images = None
+                images = None
+                masks = None
+                # pass
                 # render all
-                render_poses = torch.Tensor(np.array(poses)).to(device)
+                # render_poses = torch.Tensor(np.array(poses)).to(device)
 
             testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=torch.Tensor(images).to(device), savedir=testsavedir, render_factor=args.render_factor, gt_masks=torch.Tensor(masks).to(device))
+            rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor, gt_masks=masks, val_cam_noise=args.val_cam_noise)
             print('Done rendering', testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+            # imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=20, quality=8)
+            imageio.mimwrite(os.path.join(testsavedir, 'video.gif'), to8b(rgbs), fps=20)
 
             if len(metrics) > 0:
                 print("PSNR: %.3f  SSIM: %.4f  LPIPS: %.4f" % (metrics['psnr'], metrics['ssim'], metrics['lpips']))
@@ -1046,6 +1074,13 @@ def train():
         """
 
         global_step += 1
+
+    # finally do rendering for all views (mainly to extract depth maps for training views)
+    testsavedir = os.path.join(basedir, expname, 'final_rendering')
+    os.makedirs(testsavedir, exist_ok=True)
+    with torch.no_grad():
+        _, _, metrics = render_path(torch.Tensor(poses).to(device), hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=images, savedir=testsavedir, gt_masks=masks)
+
 
 
 if __name__=='__main__':
