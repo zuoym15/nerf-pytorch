@@ -175,7 +175,7 @@ def recenter_poses(poses):
     poses = np.linalg.inv(c2w) @ poses
     poses_[:,:3,:4] = poses[:,:3,:4]
     poses = poses_
-    return poses
+    return np.linalg.inv(c2w), poses
 
 
 #####################
@@ -245,29 +245,42 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
     if height > 0:
         factor = None #override
 
-    poses, bds, imgs = _load_data(basedir, height=height, factor=factor) # factor=8 downsamples original imgs by 8x
+    poses_raw, bds, imgs = _load_data(basedir, height=height, factor=factor) # factor=8 downsamples original imgs by 8x
     print('Loaded', basedir, bds.min(), bds.max())
     
     # Correct rotation matrix ordering and move variable dim to axis 0
-    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
-    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    poses_raw = np.concatenate([poses_raw[:, 1:2, :], -poses_raw[:, 0:1, :], poses_raw[:, 2:, :]], 1)
+    poses_raw = np.moveaxis(poses_raw, -1, 0).astype(np.float32)
     imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
     images = imgs
     bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+
+    # print(poses_raw[0, :, 0:4])
+    # assert False
     
     # Rescale if bd_factor is provided
     sc = 1. if bd_factor is None else 1./(bds.min() * bd_factor)
-    poses[:,:3,3] *= sc
+    poses_raw[:,:3,3] *= sc
     bds *= sc
     
     if recenter:
-        poses = recenter_poses(poses)
-        
-    if spherify:
-        poses, render_poses, bds = spherify_poses(poses, bds)
+        raw2recentered, poses = recenter_poses(poses_raw)
 
     else:
+        poses = poses_raw
+        raw2recentered = np.eye(4).reshape(1, 4, 4)
+
+        # debug
+        # trans = np.concatenate([poses[:, :, 0:4], np.array([0,0,0,1.]).reshape(1, 1, 4).repeat(poses.shape[0], 0)], 1) @ np.linalg.inv(np.concatenate([poses_raw[:, :, 0:4], np.array([0,0,0,1.]).reshape(1, 1, 4).repeat(poses_raw.shape[0], 0)], 1))
+        # print(trans[0])
+        # print(trans[1])
+        #
+        # assert False
         
+    if spherify:
+        poses, render_poses, bds = spherify_poses(poses_raw, bds)
+
+    else:
         c2w = poses_avg(poses)
         print('recentered', c2w.shape)
         print(c2w[:3,:4])
@@ -282,14 +295,17 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
         mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
         focal = mean_dz
 
+        focal *= 5.0
+
         # Get radii for spiral path
         shrink_factor = .8
         zdelta = close_depth * .2
         tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
         rads = np.percentile(np.abs(tt), 90, 0)
+        rads = 0.8 * rads
         c2w_path = c2w
-        N_views = 120
-        N_rots = 2
+        N_views = 60
+        N_rots = 1
         if path_zflat:
 #             zloc = np.percentile(tt, 10, 0)[2]
             zloc = -close_depth * .1
@@ -303,6 +319,24 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
         
         
     render_poses = np.array(render_poses).astype(np.float32)
+
+    # convert back into the raw format, save so that we can re-use in ours model
+    render_poses_raw = np.concatenate([render_poses[:, :, 0:4], np.array([0,0,0,1.]).reshape(1, 1, 4).repeat(render_poses.shape[0], 0)], 1) # N_views x 4 x 4
+
+    # first de-cenetring
+    render_poses_raw = np.linalg.inv(raw2recentered) @ render_poses_raw
+
+    # then scale-back
+    render_poses_raw[:, :3, 3] /= sc
+
+    # invert the symbol for some reason
+    render_poses_raw[:, :, 1:3] = -render_poses_raw[:, :, 1:3]
+
+    # finally c2w -> w2c
+    render_poses_raw = np.linalg.inv(render_poses_raw)
+
+    # save into file
+    np.save(os.path.join(basedir, 'render_poses_raw.npy'), render_poses_raw)
 
     c2w = poses_avg(poses)
     print('Data:')

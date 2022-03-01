@@ -708,7 +708,7 @@ def train():
 
 
     elif args.dataset_type == 'llff':
-        gen_poses(args.datadir)
+        # gen_poses(args.datadir)
         images, poses, bds, render_poses, i_test, sc = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify, height=args.height)
@@ -855,7 +855,8 @@ def train():
 
             rgbs, _, metrics = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, sc=sc, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor, gt_masks=masks, val_cam_noise=args.val_cam_noise)
             print('Done rendering', testsavedir)
-            # imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=20, quality=8)
+            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), format='FFMPEG', fps=20, quality=10)
+            imageio.mimwrite(os.path.join(testsavedir, 'video.wmv'), to8b(rgbs), format='FFMPEG', fps=20, quality=10)
             imageio.mimwrite(os.path.join(testsavedir, 'video.gif'), to8b(rgbs), fps=20)
 
             if len(metrics) > 0:
